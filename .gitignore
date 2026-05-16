@@ -1,0 +1,6 @@
+claude-usage
+claude-usage-cli
+*.exe
+*.test
+*.out
+.DS_Store
