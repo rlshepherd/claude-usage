@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -62,26 +63,60 @@ type UsageResponse struct {
 }
 
 var (
-	errNoCredentials = errors.New("no Claude Code credentials in Keychain (try `claude login`)")
+	errNoCredentials = errors.New("no Claude Code credentials found (try `claude login`)")
 	errUnauthorized  = errors.New("token rejected (expired? try `claude login` again)")
 )
 
 func getAccessToken() (string, error) {
-	if runtime.GOOS != "darwin" {
-		return "", fmt.Errorf("Keychain lookup is macOS-only; got GOOS=%s", runtime.GOOS)
+	var blob []byte
+	var err error
+	switch runtime.GOOS {
+	case "darwin":
+		blob, err = readDarwinKeychain()
+	case "linux":
+		blob, err = readLinuxCredentialsFile()
+	default:
+		return "", fmt.Errorf("unsupported OS: %s (only darwin and linux are supported)", runtime.GOOS)
 	}
-	out, err := exec.Command("security", "find-generic-password", "-s", keychainService, "-w").Output()
 	if err != nil {
-		return "", errNoCredentials
+		return "", err
 	}
 	var creds Credentials
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &creds); err != nil {
-		return "", fmt.Errorf("parse Keychain credentials: %w", err)
+	if err := json.Unmarshal(blob, &creds); err != nil {
+		return "", fmt.Errorf("parse credentials: %w", err)
 	}
 	if creds.ClaudeAIOAuth.AccessToken == "" {
 		return "", errors.New("credentials present but accessToken is empty")
 	}
 	return creds.ClaudeAIOAuth.AccessToken, nil
+}
+
+func readDarwinKeychain() ([]byte, error) {
+	out, err := exec.Command("security", "find-generic-password", "-s", keychainService, "-w").Output()
+	if err != nil {
+		return nil, errNoCredentials
+	}
+	return []byte(strings.TrimSpace(string(out))), nil
+}
+
+func readLinuxCredentialsFile() ([]byte, error) {
+	dir := os.Getenv("CLAUDE_CONFIG_DIR")
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, fmt.Errorf("locate home dir: %w", err)
+		}
+		dir = filepath.Join(home, ".claude")
+	}
+	path := filepath.Join(dir, ".credentials.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errNoCredentials
+		}
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return data, nil
 }
 
 func fetchRaw(token string) ([]byte, error) {
